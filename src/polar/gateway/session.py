@@ -219,7 +219,12 @@ def resolve_session_id(
     *,
     query_session_id: str | None = None,
 ) -> str:
-    """Resolve session id from explicit ids or auth, else create a new one."""
+    """Resolve session id from explicit ids or auth, else create a new one.
+
+    A registered explicit id wins, then a registered API key. Agents may send
+    their own ``x-session-id`` (OpenCode 2.x does), so an unknown explicit id
+    only opens a new session when the API key does not name one.
+    """
     lower_headers = {k.lower(): v for k, v in headers.items()}
     explicit_session_id = (
         clean_session_id(lower_headers.get("x-session-id"))
@@ -229,11 +234,8 @@ def resolve_session_id(
         or clean_session_id(query_session_id)
         or clean_session_id(body.get("_proxy_session_id"))
     )
-    if explicit_session_id:
-        if registry.get(explicit_session_id) is None:
-            registry.register(explicit_session_id)
-        else:
-            registry.update_activity(explicit_session_id)
+    if explicit_session_id and registry.get(explicit_session_id) is not None:
+        registry.update_activity(explicit_session_id)
         return explicit_session_id
 
     api_key = extract_api_key(headers)
@@ -241,6 +243,9 @@ def resolve_session_id(
         registry.update_activity(api_key)
         return api_key
 
+    if explicit_session_id:
+        registry.register(explicit_session_id)
+        return explicit_session_id
     return registry.register(generate_session_id()).session_id
 
 

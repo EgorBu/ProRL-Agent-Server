@@ -9,6 +9,8 @@ once; live progress and per-session detail are visible in the dashboard
     uv run python examples/calculator/run.py                 # docker (default)
     uv run python examples/calculator/run.py --backend apptainer
     uv run python examples/calculator/run.py --harness codex # Codex-only smoke test
+    uv run python examples/calculator/run.py --harness nemo_fabric  # every Fabric adapter
+    uv run python examples/calculator/run.py --harness nemo_fabric --fabric-adapter claude
 """
 
 from __future__ import annotations
@@ -47,6 +49,7 @@ HARNESSES = (
     "openclaw",
     "hermes",
     "mini_swe_agent",
+    "nemo_fabric",
 )
 
 INSTRUCTION = """\
@@ -97,6 +100,89 @@ HARNESS_INSTALL: dict[str, str] = {
     ),
 }
 
+# NeMo Fabric adapters, all driven by the single `nemo_fabric` harness: only
+# `settings.adapter` changes between them. INIT installs Fabric plus one adapter
+# and its harness into ~/.venv, which is first on PATH, so the preset's default
+# `python3` is the Fabric interpreter. The PyPI nightly is built from
+# FABRIC_COMMIT; TypeScript adapters (Kilo is not on npm) build from it.
+FABRIC_VERSION = "0.5.0a20261006"
+FABRIC_COMMIT = "8127fbf2b3c20c42eaaa66e0a014b95ccb5af0c8"
+_FABRIC_SRC = "$HOME/nemo-fabric"
+_HERMES_SRC = "$HOME/hermes-agent"
+_NODE24 = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-x64.tar.xz"
+
+
+def _fabric_install(*requirements: str, then: str = "") -> str:
+    pins = " ".join(f"'{requirement}'" for requirement in requirements)
+    command = (
+        "python3 -m venv $HOME/.venv && $HOME/.venv/bin/pip install --quiet "
+        f"--disable-pip-version-check 'nemo-fabric=={FABRIC_VERSION}' {pins}"
+    )
+    return f"{command} && {then}" if then else command
+
+
+def _fabric_ts_install(adapter: str, *peers: str) -> str:
+    """Build a TypeScript adapter at FABRIC_COMMIT and register its descriptor.
+
+    Fabric scans ``<venv>/share/nemo-fabric`` for descriptors and resolves the
+    runner from the real path of a symlinked one, so no discovery config is needed.
+    """
+    ts = f"{_FABRIC_SRC}/adapters/typescript"
+    workspace = f"nemo-fabric-adapters-{adapter}"
+    quiet = "--ignore-scripts --no-audit --no-fund --loglevel=error"
+    steps = [
+        f"git clone -q --filter=blob:none https://github.com/NVIDIA/NeMo-Fabric {_FABRIC_SRC}",
+        f"git -C {_FABRIC_SRC} checkout -q {FABRIC_COMMIT}",
+        f"npm ci --prefix {_FABRIC_SRC}/adapter-contract/typescript {quiet}",
+        f"npm ci --prefix {ts} --workspace {workspace} --include-workspace-root {quiet}",
+        f"npm run build --silent --prefix {_FABRIC_SRC}/adapter-contract/typescript",
+        f"npm run build --silent --prefix {ts} --workspace nemo-fabric-adapters-common",
+        f"npm run build --silent --prefix {ts} --workspace {workspace}",
+        *([f"npm install --prefix {ts} --no-save {quiet} {' '.join(peers)}"] if peers else []),
+        "mkdir -p $HOME/.venv/share/nemo-fabric",
+        f"ln -s {ts}/{adapter}/{adapter}.fabric-adapter.json $HOME/.venv/share/nemo-fabric/",
+    ]
+    return _fabric_install(then=" && ".join(steps))
+
+
+FABRIC_INSTALL: dict[str, str] = {
+    "claude": _fabric_install(f"nemo-fabric-adapters-claude[harness]=={FABRIC_VERSION}"),
+    "codex": _fabric_install(f"nemo-fabric-adapters-codex[harness]=={FABRIC_VERSION}"),
+    "deepagents": _fabric_install(
+        f"nemo-fabric-adapters-deepagents[harness]=={FABRIC_VERSION}"
+    ),
+    # Hermes >=0.20 is not on PyPI and refuses wheel builds; install the tag editable.
+    "hermes": (
+        "git clone -q --depth 1 --branch v2026.9.24 "
+        f"https://github.com/NousResearch/hermes-agent {_HERMES_SRC} && "
+        + _fabric_install(f"nemo-fabric-adapters-hermes=={FABRIC_VERSION}")
+        + f' -e "{_HERMES_SRC}[mcp]"'
+    ),
+    "mini_swe_agent": _fabric_install(
+        f"nemo-fabric-adapters-mini-swe-agent[harness]=={FABRIC_VERSION}"
+    ),
+    "nooa": _fabric_install(f"nemo-fabric-adapters-nooa[harness]=={FABRIC_VERSION}"),
+    "nooa_bench": _fabric_install(f"nemo-fabric-adapters-nooa[harness]=={FABRIC_VERSION}"),
+    # The adapter pins openclaw 2026.9.4, which needs Node >=24.16 (image has 22).
+    "openclaw": _fabric_install(
+        f"nemo-fabric-adapters-openclaw=={FABRIC_VERSION}",
+        then=(
+            f"curl -fsSL {_NODE24} | tar -xJ -C $HOME/.local --strip-components=1 && "
+            "npm install -g openclaw@2026.9.4"
+        ),
+    ),
+    "openhands": _fabric_install(
+        f"nemo-fabric-adapters-openhands=={FABRIC_VERSION}",
+        "openhands-sdk==1.50.0",
+        "openhands-tools==1.50.0",
+    ),
+    "cline": _fabric_ts_install("cline", "@cline/sdk@0.0.83"),
+    "kilo": _fabric_ts_install("kilo", "@kilocode/cli@7.7.12"),
+    "opencode": "npm install -g bun@1.4.2 && " + _fabric_ts_install("opencode"),
+    "pi": _fabric_ts_install("pi"),
+    "qwen": _fabric_ts_install("qwen"),
+}
+
 # Model name the harness CLI sends; the gateway rewrites it to the served model.
 HARNESS_MODEL: dict[str, str] = {
     "claude_code": "claude-opus-4-5",
@@ -134,6 +220,7 @@ _EVAL_EXCLUDES: dict[str, list[str]] = {
     "openhands_sdk": [".openhands/**", "**/.openhands/**"],
     "mini_swe_agent": [".mini-swe-agent/**", "**/.mini-swe-agent/**", ".config/mini-swe-agent/**"],
 }
+_EVAL_EXCLUDES["nemo_fabric"] = sorted({p for patterns in _EVAL_EXCLUDES.values() for p in patterns})
 _COMMON_EXCLUDES = [
     "node_modules/**",
     "**/node_modules/**",
@@ -150,8 +237,15 @@ def runtime_image_for_backend(backend: str) -> str:
     return RUNTIME_IMAGE
 
 
-def build_task_payload(harness: str, batch_id: str, backend: str) -> dict[str, Any]:
-    agent: dict[str, Any] = {"harness": harness, "model_name": HARNESS_MODEL[harness]}
+def build_task_payload(run: str, batch_id: str, backend: str) -> dict[str, Any]:
+    """Build one task; ``run`` is a harness name or ``nemo_fabric:<adapter>``."""
+    harness, _, adapter = run.partition(":")
+    if adapter:
+        agent: dict[str, Any] = {"harness": harness, "settings": {"adapter": adapter}}
+        install = FABRIC_INSTALL[adapter]
+    else:
+        agent = {"harness": harness, "model_name": HARNESS_MODEL[harness]}
+        install = HARNESS_INSTALL[harness]
     if harness == "codex":
         agent["settings"] = {
             "version": CODEX_VERSION,
@@ -159,7 +253,7 @@ def build_task_payload(harness: str, batch_id: str, backend: str) -> dict[str, A
         }
 
     return {
-        "task_id": f"calculator-{harness}-{batch_id}",
+        "task_id": f"calculator-{run.replace(':', '-')}-{batch_id}",
         "instruction": INSTRUCTION,
         "num_samples": NUM_SAMPLES,
         "timeout_seconds": TIMEOUT_SECONDS,
@@ -167,7 +261,7 @@ def build_task_payload(harness: str, batch_id: str, backend: str) -> dict[str, A
             "backend": backend,
             "image": runtime_image_for_backend(backend),
             "prepare": [
-                {"type": "exec", "command": f"{HARNESS_INSTALL[harness]} && {_WORKSPACE_PREPARE}"},
+                {"type": "exec", "command": f"{install} && {_WORKSPACE_PREPARE}"},
                 {
                     "type": "upload_file",
                     "source": str(TEST_FILE),
@@ -210,7 +304,7 @@ def session_reward(session: dict[str, Any]) -> float | None:
 
 
 def print_comparison(finished: dict[str, dict[str, Any]], elapsed: float) -> None:
-    header = f"{'Harness':<16} {'Reward':>8}  {'Done':>6}"
+    header = f"{'Harness':<28} {'Reward':>8}  {'Done':>6}"
     print("\n" + "=" * len(header))
     print(header)
     print("-" * len(header))
@@ -219,7 +313,7 @@ def print_comparison(finished: dict[str, dict[str, Any]], elapsed: float) -> Non
         rewards = [r for r in (session_reward(s) for s in sessions) if r is not None]
         mean = sum(rewards) / len(rewards) if rewards else 0.0
         done = sum(1 for s in sessions if s.get("status") == "COMPLETED")
-        print(f"{harness:<16} {mean:>8.3f}  {done:>2}/{len(sessions):<2}")
+        print(f"{harness:<28} {mean:>8.3f}  {done:>2}/{len(sessions):<2}")
     print("=" * len(header))
     print(f"Wall time: {elapsed:.0f}s")
 
@@ -227,19 +321,35 @@ def print_comparison(finished: dict[str, dict[str, Any]], elapsed: float) -> Non
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=["docker", "apptainer"], default="docker")
+    parser.add_argument("-c", "--topology", type=Path, default=DEFAULT_TOPOLOGY)
     parser.add_argument(
         "--harness",
         action="append",
         choices=HARNESSES,
         help="Run only this harness. Repeat to select more than one.",
     )
+    parser.add_argument(
+        "--fabric-adapter",
+        action="append",
+        choices=sorted(FABRIC_INSTALL),
+        help="With nemo_fabric, run only this Fabric adapter. Repeatable.",
+    )
     args = parser.parse_args()
     backend = args.backend
-    selected_harnesses = tuple(args.harness or HARNESSES)
+    fabric_adapters = args.fabric_adapter or sorted(FABRIC_INSTALL)
+    selected_harnesses = tuple(
+        run
+        for harness in args.harness or HARNESSES
+        for run in (
+            [f"nemo_fabric:{adapter}" for adapter in fabric_adapters]
+            if harness == "nemo_fabric"
+            else [harness]
+        )
+    )
 
     from polar.config import TopologyConfig
 
-    rollout_url = TopologyConfig.load(DEFAULT_TOPOLOGY).rollout.public_url
+    rollout_url = TopologyConfig.load(args.topology).rollout.public_url
     batch_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
     print(f"Submitting {len(selected_harnesses)} harnesses to {rollout_url} (backend={backend})")
@@ -251,7 +361,7 @@ def main() -> int:
             resp = client.post("/rollout/task/submit", json=payload)
             resp.raise_for_status()
             task_ids[harness] = resp.json()["task_id"]
-            print(f"  {harness:<16} -> {task_ids[harness]}")
+            print(f"  {harness:<28} -> {task_ids[harness]}")
 
         print(f"\nPolling every {POLL_INTERVAL_SECONDS:.0f}s (watch live in the dashboard) ...")
         t0 = time.monotonic()
