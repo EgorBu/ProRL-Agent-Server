@@ -69,6 +69,23 @@ uv run python examples/calculator/run.py
 
 Use Apptainer instead of Docker with `--backend apptainer`.
 
+#### NeMo Fabric harnesses
+
+The `nemo_fabric` harness runs every [NeMo Fabric](https://github.com/NVIDIA/NeMo-Fabric)
+adapter through one entry point; each task differs only in `settings.adapter`
+(see [the preset docs](../../src/polar/agent/README.md#nemo-fabric)):
+
+```bash
+uv run python examples/calculator/run.py --harness nemo_fabric                       # all 14 adapters
+uv run python examples/calculator/run.py --harness nemo_fabric --fabric-adapter pi   # just one
+```
+
+INIT installs Fabric `0.5.0a20261006` from PyPI plus one adapter and its harness
+into `~/.venv`. TypeScript adapters (`cline`, `kilo`, `opencode`, `pi`, `qwen`)
+build from the matching Fabric commit and link their descriptor into the venv;
+`hermes` installs Hermes Agent `v2026.9.24` from git, and `openclaw` adds
+Node 24. Pass `-c` to read the rollout URL from the topology you started.
+
 ### 5. (Optional) Watch in the dashboard
 
 `topology.vllm.yaml` shown; swap for `topology.sgl.yaml` if you use sglang.
